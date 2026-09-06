@@ -127,6 +127,15 @@
 </div>
 
 <div class="panel">
+  <h2>後台密碼</h2>
+  <div class="row">
+    <input type="password" id="newBackendPassword" placeholder="設定新密碼" style="width:160px;" autocomplete="new-password">
+    <button id="changePasswordBtn" class="ghost">更新密碼</button>
+    <span class="note" id="changePasswordMsg" style="margin:0;"></span>
+  </div>
+</div>
+
+<div class="panel">
   <h2>員工</h2>
   <div class="row">
     <input type="text" id="newEmpName" placeholder="姓名" style="width:110px;">
@@ -271,7 +280,8 @@ let state = {
   catOverride: {},   // { empId: { dateKey: 'example'|'flex'|'normal'|'annual' } }
   attendance: {},    // { empId: { dateKey: true/false } }
   otHours: {},       // { empId: { dateKey: hours } } 從打卡系統匯入的實際加班時數
-  empPickerSel: {}   // { empId: { flex:[dateKey,...], annual:[dateKey,...] } } 員工排休暫存
+  empPickerSel: {},  // { empId: { flex:[dateKey,...], annual:[dateKey,...] } } 員工排休暫存
+  backendPassword: null // 後台密碼，null時退回程式碼內建的預設密碼
 };
 
 /* ---- 連接打卡系統的 Firestore（與 guantongcompanyattendance.netlify.app 共用同一個資料庫） ---- */
@@ -302,6 +312,7 @@ function saveConfig(){
       employees: publicEmployees,
       catOverride: state.catOverride,
       attendance: state.attendance,
+      backendPassword: state.backendPassword,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }).catch(e => console.error('儲存公開設定失敗', e));
 
@@ -326,6 +337,7 @@ async function loadConfig(){
       if (d.employees) state.employees = d.employees;
       if (d.catOverride) state.catOverride = d.catOverride;
       if (d.attendance) state.attendance = d.attendance;
+      if (d.backendPassword) state.backendPassword = d.backendPassword;
     }
   }catch(e){ console.error('讀取公開設定失敗', e); }
 }
@@ -485,7 +497,8 @@ function switchTopTab(t){
 }
 async function tryBackendLogin(){
   const pw = document.getElementById('backendPassword').value;
-  if (pw === TEMP_PASSWORD){
+  const currentPassword = state.backendPassword || TEMP_PASSWORD;
+  if (pw === currentPassword){
     backendAuthed = true;
     await loadPrivateConfig();
     document.getElementById('backendGate').style.display = 'none';
@@ -502,6 +515,20 @@ document.getElementById('backendPassword').addEventListener('keydown', e => {
 document.getElementById('backendLogoutBtn').onclick = () => {
   backendAuthed = false;
   switchTopTab('public');
+};
+
+document.getElementById('changePasswordBtn').onclick = () => {
+  const inp = document.getElementById('newBackendPassword');
+  const val = inp.value.trim();
+  const msgEl = document.getElementById('changePasswordMsg');
+  if (val.length < 4){
+    msgEl.textContent = '密碼至少要4個字元';
+    return;
+  }
+  state.backendPassword = val;
+  saveConfig();
+  inp.value = '';
+  msgEl.textContent = '密碼已更新，下次登入請用新密碼。';
 };
 
 /* ---------- Admin controls ---------- */
