@@ -16,6 +16,7 @@
     --example-ink:#254161; --example-bg:#E3E9F0;
     --flex-ink:#3E5B44; --flex-bg:#E7EEE3;
     --annual-ink:#5B3E7A; --annual-bg:#EDE5F3;
+    --imported-ink:#0F8A82;
     --danger:#B5482A; --accent:#8A5A17;
   }
   *{box-sizing:border-box;}
@@ -47,6 +48,9 @@
   td.name-cell{position:sticky; left:0; z-index:2; background:var(--paper); text-align:left; padding:6px 8px; min-width:150px;}
   thead th.name-head{position:sticky; left:0; z-index:3; background:#FAF9F4; text-align:left; min-width:150px;}
   td.holiday-col{background:var(--holiday-bg)} td.example-col{background:var(--example-bg)} td.flex-col{background:var(--flex-bg)} td.annual-col{background:var(--annual-bg)}
+  td.imported-leave{box-shadow:inset 0 0 0 2px var(--imported-ink);}
+  td.leave-conflict{box-shadow:inset 0 0 0 2px var(--danger);}
+  .conflict-flag{font-size:11px; color:var(--danger); cursor:help;}
   th.week2-line, td.week2-line{border-left:3px solid #000;}
   .cat-badge{font-size:10px; font-weight:700; color:var(--ink-soft); cursor:pointer; user-select:none;}
   .cat-badge:hover{text-decoration:underline;}
@@ -159,6 +163,7 @@
       <option value="flex">休息日</option>
       <option value="example">例假</option>
       <option value="annual">特休</option>
+      <option value="holiday">國定假日</option>
     </select></div>
     <button id="applyMove">套用</button>
   </div>
@@ -169,9 +174,11 @@
   <span class="chip"><span class="dot" style="background:var(--example-bg);border:1px solid var(--example-ink)"></span>例假／排休</span>
   <span class="chip"><span class="dot" style="background:var(--flex-bg);border:1px solid var(--flex-ink)"></span>休息日</span>
   <span class="chip"><span class="dot" style="background:var(--annual-bg);border:1px solid var(--annual-ink)"></span>特休</span>
+  <span class="chip"><span class="dot" style="background:var(--paper);border:2px solid var(--imported-ink)"></span>員工自行排休（打卡系統匯入）</span>
+  <span class="chip"><span class="dot" style="background:var(--paper);border:2px solid var(--danger)"></span>⚠ 排休撞到國定假日，需要處理</span>
 </div>
 
-<p class="note">格子上方的標籤（國／例／休／特／一）可點擊切換該員工當天的類別；勾選框代表當天是否出勤。</p>
+<p class="note">格子上方的標籤（國／例／休／特／一）可點擊切換該員工當天的類別；勾選框代表當天是否出勤。格子外框顯示藍綠色代表這天是員工自己在打卡系統排休的，外框顯示紅色並有⚠符號代表這天員工排休但撞到國定假日，需要你決定是否挪移。</p>
 
 <div class="table-wrap">
   <table id="rosterTable"></table>
@@ -220,7 +227,7 @@
 </div>
 
 <div class="panel">
-  <h2>員工時薪（僅用於這個分頁的加班費計算）</h2>
+  <h2>員工時薪（依月份分開設定，僅用於這個分頁的加班費計算）</h2>
   <div id="hourlyRateList"></div>
 </div>
 
@@ -280,6 +287,8 @@ let state = {
   catOverride: {},   // { empId: { dateKey: 'example'|'flex'|'normal'|'annual' } }
   attendance: {},    // { empId: { dateKey: true/false } }
   otHours: {},       // { empId: { dateKey: hours } } 從打卡系統匯入的實際加班時數
+  hourlyRates: {},   // { empId: { 'YYYY-MM': rate } } 加班時薪，隨月份分開設定
+  leaveRequests: {}, // { empId: [dateKey,...] } 打卡系統匯入的原始排休申請日期(不論是否套用成功)
   empPickerSel: {},  // { empId: { flex:[dateKey,...], annual:[dateKey,...] } } 員工排休暫存
   backendPassword: null // 後台密碼，null時退回程式碼內建的預設密碼
 };
@@ -323,6 +332,7 @@ function saveConfig(){
       });
       punchDb.collection('schedule_config').doc('private').set({
         salaries: privateData,
+        hourlyRates: state.hourlyRates,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       }).catch(e => console.error('儲存薪資設定失敗', e));
     }
@@ -346,11 +356,13 @@ async function loadPrivateConfig(){
   try{
     const doc = await punchDb.collection('schedule_config').doc('private').get();
     if (doc.exists){
-      const salaries = doc.data().salaries || {};
+      const data = doc.data();
+      const salaries = data.salaries || {};
       state.employees.forEach(e => {
         const s = salaries[e.id];
         if (s){ e.salary = s.salary; e.hourlyRate = s.hourlyRate; e.hireDate = s.hireDate; }
       });
+      if (data.hourlyRates) state.hourlyRates = data.hourlyRates;
       renderAll(); renderOtView();
     }
   }catch(e){ console.error('讀取薪資設定失敗（可能尚未登入或規則未設定）', e); }
@@ -372,10 +384,11 @@ function getHoliday(year, m, d){
   return null;
 }
 function getEmpCategory(empId, year, m, d){
-  if (getHoliday(year, m, d)) return 'holiday';
   const key = dateKey(year, m, d);
   const ov = state.catOverride[empId] && state.catOverride[empId][key];
-  return ov || 'normal';
+  if (ov) return ov;
+  if (getHoliday(year, m, d)) return 'holiday';
+  return 'normal';
 }
 function setEmpCategory(empId, key, cat){
   if (!state.catOverride[empId]) state.catOverride[empId] = {};
@@ -383,7 +396,7 @@ function setEmpCategory(empId, key, cat){
 }
 function getAttend(empId, key){ return !!(state.attendance[empId] && state.attendance[empId][key]); }
 function setAttend(empId, key, val){ if (!state.attendance[empId]) state.attendance[empId]={}; state.attendance[empId][key]=val; }
-function isWorkless(cat){ return cat==='example' || cat==='annual'; }
+function isWorkless(cat){ return cat==='example' || cat==='annual' || cat==='holiday'; }
 function catLabel(cat){ return cat==='holiday' ? '國' : cat==='example' ? '例' : cat==='flex' ? '休' : cat==='annual' ? '特' : '一'; }
 
 /* ---- 特休（勞基法第38條，依到職日年資計算） ---- */
@@ -420,6 +433,27 @@ function annualUsed(empId){
 }
 
 function getOtHours(empId, key){ return (state.otHours[empId] && state.otHours[empId][key]) || 0; }
+function monthKey(year, month){ return `${year}-${pad(month)}`; }
+function getHourlyRate(empId, year, month){
+  const rates = state.hourlyRates[empId];
+  const mk = monthKey(year, month);
+  if (rates && rates[mk] != null) return rates[mk];
+  // 這個月還沒設定過的話，往前找最近一個有設定過的月份，自動帶入當作預設值
+  if (rates){
+    let y = year, m = month;
+    for (let i=0; i<24; i++){
+      m--; if (m<1){ m=12; y--; }
+      const k = monthKey(y, m);
+      if (rates[k] != null) return rates[k];
+    }
+  }
+  const emp = state.employees.find(e => e.id === empId);
+  return (emp && emp.hourlyRate) || null; // 舊資料相容：完全沒按月設定過時，退回舊的單一時薪欄位
+}
+function setHourlyRate(empId, year, month, rate){
+  if (!state.hourlyRates[empId]) state.hourlyRates[empId] = {};
+  state.hourlyRates[empId][monthKey(year, month)] = rate;
+}
 function otHoursToPay(hours, hourly){
   const h1 = Math.min(hours,2), h2 = Math.max(0, hours-2);
   return hourly*(h1*4/3 + h2*5/3);
@@ -620,9 +654,10 @@ function applyLeavesSnapshot(snap){
   Object.keys(byPerson).forEach(name => {
     const emp = state.employees.find(e => e.name === name);
     if (!emp){ unmatched.add(name); return; }
+    state.leaveRequests[emp.id] = byPerson[name]; // 保留原始申請清單，不論後面是否成功套用
     byPerson[name].forEach(dKey => {
       const [y,m,d] = dKey.split('-').map(Number);
-      if (getEmpCategory(emp.id, y, m, d) === 'holiday') return; // 國定假日優先，不覆蓋
+      if (getEmpCategory(emp.id, y, m, d) === 'holiday') return; // 國定假日優先，先不覆蓋，畫面上會標示衝突提醒你處理
       setEmpCategory(emp.id, dKey, 'example');
       setAttend(emp.id, dKey, false);
     });
@@ -630,6 +665,13 @@ function applyLeavesSnapshot(snap){
   noteSync(`排休 ${snap.size} 筆`, unmatched);
   renderAll(); renderOtView(); renderEmpView();
   saveConfig();
+}
+function isImportedLeaveDay(empId, key){
+  return !!(state.leaveRequests[empId] && state.leaveRequests[empId].includes(key));
+}
+function isLeaveHolidayConflict(empId, year, m, d){
+  const key = dateKey(year, m, d);
+  return isImportedLeaveDay(empId, key) && getEmpCategory(empId, year, m, d) === 'holiday';
 }
 
 let lastSyncParts = { records:'', leaves:'' };
@@ -706,7 +748,12 @@ function renderTable(){
       const worked = getAttend(emp.id, key);
       const violation = cat==='example' && worked;
       const week2 = (d>1 && (d-1)%14===0) ? ' week2-line' : '';
-      tbody += `<td class="${colCls}${week2}">
+      const conflict = isLeaveHolidayConflict(emp.id, state.year, state.month, d);
+      const imported = !conflict && isImportedLeaveDay(emp.id, key) && cat === 'example';
+      const extraCls = conflict ? ' leave-conflict' : (imported ? ' imported-leave' : '');
+      const conflictFlag = conflict ? `<div class="conflict-flag" title="員工已在打卡系統排休這天，但目前是國定假日，系統未覆蓋。如需讓員工這天真的休假，請用「單一調整」把國定假日挪到別天。">⚠</div>` : '';
+      tbody += `<td class="${colCls}${week2}${extraCls}">
+        ${conflictFlag}
         <div class="cat-badge" data-emp="${emp.id}" data-date="${key}" data-cat="${cat}" ${cat==='holiday'?'style="cursor:default;"':''}>${catLabel(cat)}</div>
         <input type="checkbox" class="attend-check" data-emp="${emp.id}" data-date="${key}" ${worked?'checked':''} style="${violation?'outline:2px solid var(--danger);':''}">
       </td>`;
@@ -955,15 +1002,16 @@ function renderOtView(){
   const days = Array.from({length:dim},(_,i)=>i+1);
 
   const rateWrap = document.getElementById('hourlyRateList');
-  rateWrap.innerHTML = state.employees.map(e => `
+  rateWrap.innerHTML = `<p class="note" style="margin:0 0 8px;">目前設定的是 ${state.year}年${state.month}月 的時薪，每個月可以分開填。</p>` +
+    state.employees.map(e => `
     <div class="row" style="margin-bottom:4px;">
       <span style="width:70px;">${e.name}</span>
-      <input type="number" data-hourly="${e.id}" value="${e.hourlyRate ?? ''}" placeholder="時薪" style="width:100px;">
+      <input type="number" data-hourly="${e.id}" value="${getHourlyRate(e.id, state.year, state.month) ?? ''}" placeholder="本月時薪" style="width:100px;">
     </div>
   `).join('');
   rateWrap.querySelectorAll('[data-hourly]').forEach(inp => {
     inp.onchange = () => {
-      state.employees.find(e=>e.id===inp.dataset.hourly).hourlyRate = inp.value? parseFloat(inp.value): null;
+      setHourlyRate(inp.dataset.hourly, state.year, state.month, inp.value? parseFloat(inp.value): null);
       renderOtView();
       saveConfig();
     };
@@ -993,12 +1041,13 @@ function renderOtView(){
   const sumWrap = document.getElementById('otSummary');
   sumWrap.innerHTML = '';
   state.employees.forEach(emp => {
+    const rate = getHourlyRate(emp.id, state.year, state.month);
     let totalHours = 0, pay = 0;
     for (let d=1; d<=dim; d++){
       const h = getOtHours(emp.id, dateKey(state.year, state.month, d));
       if (h>0){
         totalHours += h;
-        if (emp.hourlyRate) pay += otHoursToPay(h, emp.hourlyRate);
+        if (rate) pay += otHoursToPay(h, rate);
       }
     }
     const card = document.createElement('div');
@@ -1006,7 +1055,7 @@ function renderOtView(){
     card.innerHTML = `
       <h3>${emp.name}</h3>
       <div class="sum-line"><span>加班時數</span><span>${Math.round(totalHours*100)/100} 小時</span></div>
-      ${emp.hourlyRate ? `<div class="sum-line total"><span>加班費估算</span><span>NT$ ${Math.round(pay).toLocaleString()}</span></div>` : `<div class="sum-line"><span>尚未設定時薪</span></div>`}
+      ${rate ? `<div class="sum-line total"><span>加班費估算</span><span>NT$ ${Math.round(pay).toLocaleString()}</span></div>` : `<div class="sum-line"><span>尚未設定本月時薪</span></div>`}
     `;
     sumWrap.appendChild(card);
   });
