@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
   :root{
     --bg:#F7F5EE; --paper:#FFFFFF; --ink:#23261F; --ink-soft:#5B5A4E; --line:#DAD5C6;
@@ -75,9 +76,44 @@
 <h1>班表系統</h1>
 
 <div class="tabs no-print">
+  <button class="tab-btn" id="tabPublic">本月班表</button>
+  <button class="tab-btn" id="tabBackend">後台登入</button>
+</div>
+
+<!-- ===================== 公開班表（不用密碼） ===================== -->
+<div id="publicView">
+
+<div class="panel">
+  <h2>本月班表總覽</h2>
+  <div class="legend" style="margin-bottom:10px;">
+    <span class="chip"><span class="dot" style="background:var(--holiday-bg);border:1px solid var(--holiday-ink)"></span>國定假日</span>
+    <span class="chip"><span class="dot" style="background:var(--example-bg);border:1px solid var(--example-ink)"></span>例假／排休</span>
+    <span class="chip"><span class="dot" style="background:var(--flex-bg);border:1px solid var(--flex-ink)"></span>休息日</span>
+    <span class="chip"><span class="dot" style="background:var(--annual-bg);border:1px solid var(--annual-ink)"></span>特休</span>
+  </div>
+  <div class="table-wrap"><table id="leaveOverviewTable"></table></div>
+</div>
+
+</div>
+
+<!-- ===================== 後台登入 ===================== -->
+<div id="backendGate" style="display:none;">
+  <div class="panel">
+    <div class="row">
+      <input type="password" id="backendPassword" placeholder="請輸入後台密碼" autocomplete="current-password">
+      <button id="backendLoginBtn">登入</button>
+      <span class="note" id="backendLoginMsg" style="margin:0;"></span>
+    </div>
+  </div>
+</div>
+
+<div id="backendWrap" style="display:none;">
+
+<div class="tabs no-print">
   <button class="tab-btn" id="tabAdmin">管理後台</button>
   <button class="tab-btn" id="tabEmp">員工排休</button>
   <button class="tab-btn" id="tabOt">加班匯入</button>
+  <button class="tab-btn ghost" id="backendLogoutBtn" style="margin-left:auto;">登出</button>
 </div>
 
 <!-- ===================== 管理後台 ===================== -->
@@ -163,17 +199,6 @@
   <span class="note" id="empMsg" style="margin:0;"></span>
 </div>
 
-<div class="panel">
-  <h2>本月排休總覽（所有人都看得到）</h2>
-  <div class="legend" style="margin-bottom:10px;">
-    <span class="chip"><span class="dot" style="background:var(--holiday-bg);border:1px solid var(--holiday-ink)"></span>國定假日</span>
-    <span class="chip"><span class="dot" style="background:var(--example-bg);border:1px solid var(--example-ink)"></span>例假／排休</span>
-    <span class="chip"><span class="dot" style="background:var(--flex-bg);border:1px solid var(--flex-ink)"></span>休息日</span>
-    <span class="chip"><span class="dot" style="background:var(--annual-bg);border:1px solid var(--annual-ink)"></span>特休</span>
-  </div>
-  <div class="table-wrap"><table id="leaveOverviewTable"></table></div>
-</div>
-
 </div>
 
 <!-- ===================== 加班匯入 ===================== -->
@@ -200,6 +225,10 @@
 </div>
 
 </div>
+<!-- /otView -->
+
+</div>
+<!-- /backendWrap -->
 
 <script>
 const HOLIDAYS = {
@@ -260,32 +289,59 @@ try{
   punchDb = firebase.firestore();
 }catch(e){ console.error('Firebase 初始化失敗', e); }
 
-/* ---- 班表系統自己的設定資料（員工、薪資、手動排班）存到同一個 Firebase 的 schedule_config 集合 ---- */
-const CONFIG_DOC = 'main';
+/* ---- 班表系統自己的設定資料存到 schedule_config：
+   public  = 姓名、例假/休息日/特休設定、出勤 → 任何人可讀（公開班表要用）
+   private = 薪資、時薪、到職日 → 只有登入後才可讀寫 ---- */
 let saveTimer = null;
 function saveConfig(){
   if (!punchDb) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    punchDb.collection('schedule_config').doc(CONFIG_DOC).set({
-      employees: state.employees,
+    const publicEmployees = state.employees.map(e => ({ id: e.id, name: e.name }));
+    punchDb.collection('schedule_config').doc('public').set({
+      employees: publicEmployees,
       catOverride: state.catOverride,
       attendance: state.attendance,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }).catch(e => console.error('儲存設定失敗', e));
+    }).catch(e => console.error('儲存公開設定失敗', e));
+
+    if (backendAuthed){
+      const privateData = {};
+      state.employees.forEach(e => {
+        privateData[e.id] = { salary: e.salary ?? null, hourlyRate: e.hourlyRate ?? null, hireDate: e.hireDate ?? null };
+      });
+      punchDb.collection('schedule_config').doc('private').set({
+        salaries: privateData,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }).catch(e => console.error('儲存薪資設定失敗', e));
+    }
   }, 600);
 }
 async function loadConfig(){
   if (!punchDb) return;
   try{
-    const doc = await punchDb.collection('schedule_config').doc(CONFIG_DOC).get();
+    const doc = await punchDb.collection('schedule_config').doc('public').get();
     if (doc.exists){
       const d = doc.data();
       if (d.employees) state.employees = d.employees;
       if (d.catOverride) state.catOverride = d.catOverride;
       if (d.attendance) state.attendance = d.attendance;
     }
-  }catch(e){ console.error('讀取設定失敗', e); }
+  }catch(e){ console.error('讀取公開設定失敗', e); }
+}
+async function loadPrivateConfig(){
+  if (!punchDb) return;
+  try{
+    const doc = await punchDb.collection('schedule_config').doc('private').get();
+    if (doc.exists){
+      const salaries = doc.data().salaries || {};
+      state.employees.forEach(e => {
+        const s = salaries[e.id];
+        if (s){ e.salary = s.salary; e.hourlyRate = s.hourlyRate; e.hireDate = s.hireDate; }
+      });
+      renderAll(); renderOtView();
+    }
+  }catch(e){ console.error('讀取薪資設定失敗（可能尚未登入或規則未設定）', e); }
 }
 
 function pad(n){ return String(n).padStart(2,'0'); }
@@ -396,6 +452,57 @@ function switchTab(t){
   if (t==='emp') renderEmpView();
   if (t==='ot') renderOtView();
 }
+
+/* ---------- 公開頁 / 後台登入 ----------
+   目前先用簡單密碼比對（TEMP_PASSWORD），之後設定好 Firebase Authentication
+   帳號後，再改成呼叫 signInWithEmailAndPassword 的正式登入方式。 */
+const TEMP_PASSWORD = 'CHANGE_ME_1234'; // 部署前請改成自己的密碼
+let backendAuthed = false;
+
+document.getElementById('tabPublic').onclick = () => switchTopTab('public');
+document.getElementById('tabBackend').onclick = () => switchTopTab('backend');
+function switchTopTab(t){
+  document.getElementById('publicView').style.display = t==='public' ? '' : 'none';
+  document.getElementById('tabPublic').classList.toggle('active', t==='public');
+  document.getElementById('tabBackend').classList.toggle('active', t==='backend');
+  if (t==='public'){
+    document.getElementById('backendGate').style.display = 'none';
+    document.getElementById('backendWrap').style.display = 'none';
+    renderLeaveOverview();
+  } else {
+    if (backendAuthed){
+      document.getElementById('backendGate').style.display = 'none';
+      document.getElementById('backendWrap').style.display = '';
+      switchTab('admin');
+    } else {
+      document.getElementById('backendGate').style.display = '';
+      document.getElementById('backendWrap').style.display = 'none';
+      document.getElementById('backendPassword').value = '';
+      document.getElementById('backendLoginMsg').textContent = '';
+      document.getElementById('backendPassword').focus();
+    }
+  }
+}
+async function tryBackendLogin(){
+  const pw = document.getElementById('backendPassword').value;
+  if (pw === TEMP_PASSWORD){
+    backendAuthed = true;
+    await loadPrivateConfig();
+    document.getElementById('backendGate').style.display = 'none';
+    document.getElementById('backendWrap').style.display = '';
+    switchTab('admin');
+  } else {
+    document.getElementById('backendLoginMsg').textContent = '密碼錯誤';
+  }
+}
+document.getElementById('backendLoginBtn').onclick = tryBackendLogin;
+document.getElementById('backendPassword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') tryBackendLogin();
+});
+document.getElementById('backendLogoutBtn').onclick = () => {
+  backendAuthed = false;
+  switchTopTab('public');
+};
 
 /* ---------- Admin controls ---------- */
 function initSelectors(){
@@ -514,7 +621,7 @@ async function startPunchSync(){
   await loadConfig();
   initSelectors();
   renderAll();
-  switchTab('admin');
+  switchTopTab('public');
   if (punchDb){
     punchDb.collection('records').onSnapshot(applyPunchSnapshot, err => {
       console.error(err);
@@ -883,6 +990,7 @@ function renderAll(){
   renderMoveSelectors();
   renderTable();
   renderSummary();
+  renderLeaveOverview();
 }
 
 startPunchSync();
