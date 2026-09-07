@@ -463,10 +463,13 @@ function restDayPay(totalHours, hourly){
   return hourly*(Math.min(bucket,2)*4/3 + Math.max(0,bucket-2)*5/3);
 }
 
+const OT_MULTIPLIER = 1 + 4*(2*4/3 + 6*5/3)/240; // 目標月薪 = 底薪 × 這個乘數（4天休息日出勤加給打平用的同一套公式）
+
 function estimateSalary(emp, dim){
   if (!emp.salary) return null;
   const hourly = emp.salary/240;
-  const dailyWage = emp.salary/30;
+  const exampleDailyWage = emp.salary/30;                    // 例假出勤：用底薪換算的日薪
+  const holidayDailyWage = emp.salary*OT_MULTIPLIER/30;       // 國定假日出勤：用「目標月薪」換算的日薪
   let extra = 0, flexWorked = 0, holidayWorked = 0;
   for (let d=1; d<=dim; d++){
     const key = dateKey(state.year, state.month, d);
@@ -476,9 +479,12 @@ function estimateSalary(emp, dim){
     if (cat==='flex'){
       flexWorked++;
       extra += restDayPay(8, hourly); // 只算白天出勤，固定以8小時計，不含加班時數
-    } else if (cat==='example' || cat==='holiday'){
+    } else if (cat==='holiday'){
       holidayWorked++;
-      extra += dailyWage;
+      extra += holidayDailyWage;
+    } else if (cat==='example'){
+      holidayWorked++;
+      extra += exampleDailyWage;
     }
   }
   return { base: emp.salary, flexWorked, holidayWorked, extra, total: emp.salary+extra };
