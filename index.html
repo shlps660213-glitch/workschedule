@@ -52,8 +52,21 @@
   td.leave-conflict{box-shadow:inset 0 0 0 2px var(--danger);}
   .conflict-flag{font-size:11px; color:var(--danger); cursor:help;}
   th.week2-line, td.week2-line{border-left:3px solid #000;}
-  .cat-badge{font-size:10px; font-weight:700; color:var(--ink-soft); cursor:pointer; user-select:none;}
-  .cat-badge:hover{text-decoration:underline;}
+  .cat-badge{font-size:11px; font-weight:700; color:var(--ink); cursor:pointer; user-select:none; text-decoration:underline dotted; text-underline-offset:2px;}
+  .cat-badge:hover{background:#00000010; border-radius:3px;}
+  #catPopup{
+    position:fixed; z-index:1000; display:none;
+    background:var(--paper); border:1px solid var(--ink); border-radius:8px;
+    box-shadow:0 6px 18px rgba(0,0,0,.18); overflow:hidden; min-width:96px;
+  }
+  #catPopup button{
+    display:block; width:100%; text-align:left; padding:8px 12px;
+    border:none; border-radius:0; background:var(--paper); color:var(--ink);
+    font-size:13px; font-weight:400; border-bottom:1px solid var(--line);
+  }
+  #catPopup button:last-child{border-bottom:none;}
+  #catPopup button:hover{background:var(--bg);}
+  #catPopup button.current{font-weight:700; background:var(--bg);}
   .name-input{border:none; background:transparent; font-size:13px; font-weight:600; width:90px;}
   .remove-emp{border:none; background:none; color:var(--ink-soft); cursor:pointer; font-size:12px; margin-left:4px;}
   .salary-input{border:none; background:transparent; font-size:11px; color:var(--ink-soft); width:85px; margin-top:2px;}
@@ -167,6 +180,14 @@
     </select></div>
     <button id="applyMove">套用</button>
   </div>
+  <div class="row" style="margin-top:10px; border-top:1px solid var(--line); padding-top:10px;">
+    <div class="field"><label>員工</label><select id="swapEmp"></select></div>
+    <div class="field"><label>日期A</label><select id="swapDayA"></select></div>
+    <div class="field"><label>對調日期B</label><select id="swapDayB"></select></div>
+    <button id="applySwap" class="ghost">交換這兩天</button>
+    <span class="note" id="swapMsg" style="margin:0;"></span>
+  </div>
+  <p class="note" style="margin:6px 0 0;">「交換」會把A、B兩天的類別（例假/休息日/特休/國定/一般）整個對調，適合真正的「挪移」——例如把某天的例假搬到另一天，不用分兩次設定。</p>
 </div>
 
 <div class="legend panel">
@@ -245,6 +266,8 @@
 
 </div>
 <!-- /backendWrap -->
+
+<div id="catPopup"></div>
 
 <script>
 const HOLIDAYS = {
@@ -721,6 +744,28 @@ document.getElementById('applyMove').onclick = () => {
   saveConfig();
 };
 
+document.getElementById('applySwap').onclick = () => {
+  const empId = document.getElementById('swapEmp').value;
+  const keyA = document.getElementById('swapDayA').value;
+  const keyB = document.getElementById('swapDayB').value;
+  const msgEl = document.getElementById('swapMsg');
+  if (keyA === keyB){
+    msgEl.textContent = '兩個日期一樣，沒有東西可以交換。';
+    return;
+  }
+  const [ya,ma,da] = keyA.split('-').map(Number);
+  const [yb,mb,db] = keyB.split('-').map(Number);
+  const catA = getEmpCategory(empId, ya, ma, da);
+  const catB = getEmpCategory(empId, yb, mb, db);
+  setEmpCategory(empId, keyA, catB);
+  setAttend(empId, keyA, !isWorkless(catB));
+  setEmpCategory(empId, keyB, catA);
+  setAttend(empId, keyB, !isWorkless(catA));
+  renderAll();
+  saveConfig();
+  msgEl.textContent = `已交換：${keyA}（原本${catLabel(catA)}→${catLabel(catB)}）與 ${keyB}（原本${catLabel(catB)}→${catLabel(catA)}）`;
+};
+
 /* ---------- Roster table ---------- */
 function renderTable(){
   const table = document.getElementById('rosterTable');
@@ -760,7 +805,7 @@ function renderTable(){
       const conflictFlag = conflict ? `<div class="conflict-flag" title="員工已在打卡系統排休這天，但目前是國定假日，系統未覆蓋。如需讓員工這天真的休假，請用「單一調整」把國定假日挪到別天。">⚠</div>` : '';
       tbody += `<td class="${colCls}${week2}${extraCls}">
         ${conflictFlag}
-        <div class="cat-badge" data-emp="${emp.id}" data-date="${key}" data-cat="${cat}" ${cat==='holiday'?'style="cursor:default;"':''}>${catLabel(cat)}</div>
+        <div class="cat-badge" data-emp="${emp.id}" data-date="${key}" data-cat="${cat}">${catLabel(cat)}</div>
         <input type="checkbox" class="attend-check" data-emp="${emp.id}" data-date="${key}" ${worked?'checked':''} style="${violation?'outline:2px solid var(--danger);':''}">
       </td>`;
     });
@@ -791,17 +836,54 @@ function renderTable(){
     cb.onchange = () => { setAttend(cb.dataset.emp, cb.dataset.date, cb.checked); renderAll(); saveConfig(); };
   });
   table.querySelectorAll('.cat-badge').forEach(badge => {
-    if (badge.dataset.cat === 'holiday') return;
-    badge.onclick = () => {
-      const idx = CAT_CYCLE.indexOf(badge.dataset.cat);
-      const next = CAT_CYCLE[(idx+1) % CAT_CYCLE.length];
-      setEmpCategory(badge.dataset.emp, badge.dataset.date, next);
-      setAttend(badge.dataset.emp, badge.dataset.date, !isWorkless(next));
+    badge.onclick = (e) => {
+      e.stopPropagation();
+      openCatPopup(badge);
+    };
+  });
+}
+
+const CAT_OPTIONS = [
+  { value: 'normal', label: '一般工作日' },
+  { value: 'flex', label: '休息日' },
+  { value: 'example', label: '例假' },
+  { value: 'annual', label: '特休' },
+  { value: 'holiday', label: '國定假日' }
+];
+
+function openCatPopup(badge){
+  const popup = document.getElementById('catPopup');
+  const empId = badge.dataset.emp, key = badge.dataset.date, curCat = badge.dataset.cat;
+  popup.innerHTML = CAT_OPTIONS.map(o =>
+    `<button type="button" class="${o.value===curCat?'current':''}" data-value="${o.value}">${o.label}</button>`
+  ).join('');
+  popup.querySelectorAll('button').forEach(btn => {
+    btn.onclick = () => {
+      const next = btn.dataset.value;
+      setEmpCategory(empId, key, next);
+      setAttend(empId, key, !isWorkless(next));
+      popup.style.display = 'none';
       renderAll();
       saveConfig();
     };
   });
+  const rect = badge.getBoundingClientRect();
+  popup.style.display = 'block';
+  const popupW = popup.offsetWidth, popupH = popup.offsetHeight;
+  let left = rect.left;
+  let top = rect.bottom + 4;
+  if (left + popupW > window.innerWidth - 8) left = window.innerWidth - popupW - 8;
+  if (top + popupH > window.innerHeight - 8) top = rect.top - popupH - 4;
+  popup.style.left = Math.max(8, left) + 'px';
+  popup.style.top = Math.max(8, top) + 'px';
 }
+document.addEventListener('click', (e) => {
+  const popup = document.getElementById('catPopup');
+  if (popup.style.display === 'block' && !popup.contains(e.target)) popup.style.display = 'none';
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.getElementById('catPopup').style.display = 'none';
+});
 
 function renderMoveSelectors(){
   const dim = daysInMonth(state.year, state.month);
@@ -809,6 +891,12 @@ function renderMoveSelectors(){
   moveEmp.innerHTML = state.employees.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
   const moveDay = document.getElementById('moveDay');
   moveDay.innerHTML = Array.from({length:dim},(_,i)=>i+1).map(d=>`<option value="${dateKey(state.year,state.month,d)}">${state.month}/${d}</option>`).join('');
+
+  const dayOptions = Array.from({length:dim},(_,i)=>i+1).map(d=>`<option value="${dateKey(state.year,state.month,d)}">${state.month}/${d}</option>`).join('');
+  const swapEmp = document.getElementById('swapEmp');
+  swapEmp.innerHTML = state.employees.map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
+  document.getElementById('swapDayA').innerHTML = dayOptions;
+  document.getElementById('swapDayB').innerHTML = dayOptions;
 }
 
 function checkMissingExampleWeeks(empId, dim){
